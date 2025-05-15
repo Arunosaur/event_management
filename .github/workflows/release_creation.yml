@@ -1,0 +1,87 @@
+name: Create Release Artifact
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  create-release:
+    name: Create Release Artifact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Setup SQLcl
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'oracle'
+          java-version: '17'
+      
+      - name: Download SQLcl
+        run: |
+          wget https://download.oracle.com/otn_software/java/sqldeveloper/sqlcl-latest.zip
+          unzip sqlcl-latest.zip
+          echo "$PWD/sqlcl/bin" >> $GITHUB_PATH
+      
+      - name: Get Version
+        id: get_version
+        run: |
+          # Extract version from git tag or generate from commit hash
+          VERSION=$(git describe --tags --always)
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+      
+      - name: Generate Release Artifact
+        run: |
+          mkdir -p ./release
+          
+          # Connect to dev database and generate artifact
+          sql -S /nolog <<EOF
+          connect ${{ secrets.DEV_DB_USERNAME }}/${{ secrets.DEV_DB_PASSWORD }}@${{ secrets.DEV_DB_CONNECTION_STRING }}
+          project gen-artifact -directory ./release
+          exit
+          EOF
+          
+          # Create a zip file of the artifact
+          cd ./release
+          zip -r ../release-artifact-${{ env.VERSION }}.zip .
+          cd ..
+      
+      - name: Create Release Tag
+        id: create_tag
+        run: |
+          # Create a new tag if not exists
+          git tag -a v${{ env.VERSION }} -m "Release v${{ env.VERSION }}" || true
+          git push origin v${{ env.VERSION }} || true
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: Release v${{ env.VERSION }}
+          draft: false
+          prerelease: false
+          files: |
+            release-artifact-${{ env.VERSION }}.zip
+          body: |
+            # Release v${{ env.VERSION }}
+            
+            ## Changes in this release:
+            ${{ github.event.head_commit.message }}
+            
+            ## Deployment Instructions
+            1. Download the release artifact
+            2. Use SQLcl to deploy to target environment
+            3. See deployment guide for detailed instructions
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Save Release Info
+        run: |
+          echo "Release URL: ${{ steps.create_release.outputs.url }}"
+          echo "Release v${{ env.VERSION }} created successfully"
+
