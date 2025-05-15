@@ -40,7 +40,7 @@ jobs:
 
       - name: Create Project Release
         run: |
-          ${SQLCL_PATH} "SVC_CICD/SvcCicdPass@PDB_DEV" << EOF
+          ${SQLCL_PATH} ""Dana[EM]"/DanaPass@PDB_DEV" << EOF
           project release -version ${{ steps.release_version.outputs.version }}
           exit
           EOF
@@ -48,7 +48,7 @@ jobs:
       - name: Generate Artifact
         id: artifact_gen
         run: |
-          ${SQLCL_PATH} "SVC_CICD/SvcCicdPass@PDB_DEV" << EOF
+          ${SQLCL_PATH} ""Dana[EM]"/DanaPass@PDB_DEV" << EOF
           project gen-artifact
           exit
           EOF
