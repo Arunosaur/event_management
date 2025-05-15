@@ -13,7 +13,7 @@ env:
 jobs:
   # Job for pull request validation - runs on PR creation/update to main
   validate-pr:
-    name: Validate Pull Request
+    name: SQL PR Validation
     runs-on: self-hosted
     if: github.event_name == 'pull_request'
     
@@ -38,8 +38,8 @@ jobs:
           echo "No SQL errors found in staged changes"
 
   # Jobs for push to main (after PR merge) - create release and deploy to environments
-  create-release:
-    name: Create Release and Artifact
+  release-artifact:
+    name: SQL Release Creation
     runs-on: self-hosted
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     outputs:
@@ -96,8 +96,8 @@ jobs:
           retention-days: 30
   
   deploy-test:
-    name: Deploy to TEST Environment
-    needs: create-release
+    name: SQL Deploy to TEST
+    needs: release-artifact
     runs-on: self-hosted
     environment:
       name: test
@@ -115,7 +115,7 @@ jobs:
       - name: Deploy to TEST
         run: |
           echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.TEST_CONNECTION_STRING }}" > deploy.sql
-          echo "project deploy -file ./artifacts/${{ needs.create-release.outputs.artifact_name }} -verbose" >> deploy.sql
+          echo "project deploy -file ./artifacts/${{ needs.release-artifact.outputs.artifact_name }} -verbose" >> deploy.sql
           ${SQLCL_PATH} @deploy.sql
       
       - name: Run Validation Tests
@@ -126,8 +126,8 @@ jobs:
           ${SQLCL_PATH} @tests.sql
   
   deploy-uat:
-    name: Deploy to UAT Environment
-    needs: [create-release, deploy-test]
+    name: SQL Deploy to UAT
+    needs: [release-artifact, deploy-test]
     runs-on: self-hosted
     environment:
       name: uat
@@ -146,12 +146,12 @@ jobs:
       - name: Deploy to UAT
         run: |
           echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.UAT_CONNECTION_STRING }}" > deploy.sql
-          echo "project deploy -file ./artifacts/${{ needs.create-release.outputs.artifact_name }} -verbose" >> deploy.sql
+          echo "project deploy -file ./artifacts/${{ needs.release-artifact.outputs.artifact_name }} -verbose" >> deploy.sql
           ${SQLCL_PATH} @deploy.sql
 
   deploy-prod:
-    name: Deploy to PROD Environment
-    needs: [create-release, deploy-test, deploy-uat]
+    name: SQL Deploy to PROD
+    needs: [release-artifact, deploy-test, deploy-uat]
     runs-on: self-hosted
     environment:
       name: prod
@@ -170,6 +170,6 @@ jobs:
       - name: Deploy to PROD
         run: |
           echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.PROD_CONNECTION_STRING }}" > deploy.sql
-          echo "project deploy -file ./artifacts/${{ needs.create-release.outputs.artifact_name }} -verbose" >> deploy.sql
+          echo "project deploy -file ./artifacts/${{ needs.release-artifact.outputs.artifact_name }} -verbose" >> deploy.sql
           ${SQLCL_PATH} @deploy.sql
 
