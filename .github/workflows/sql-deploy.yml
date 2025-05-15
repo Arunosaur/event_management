@@ -1,0 +1,240 @@
+name: SQL Database Deployment
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  SQLCL_VERSION: "25.1.1.0"
+  PROJECT_NAME: "event_management"
+
+jobs:
+  # Job for pull request validation - runs on PR creation/update to main
+  validate-pr:
+    name: Validate Pull Request
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      
+      - name: Download and install SQLcl
+        run: |
+          mkdir -p $HOME/sqlcl
+          curl -o $HOME/sqlcl.zip https://download.oracle.com/otn_software/java/sqldeveloper/sqlcl-${{ env.SQLCL_VERSION }}.zip
+          unzip $HOME/sqlcl.zip -d $HOME
+          echo "$HOME/sqlcl/bin" >> $GITHUB_PATH
+      
+      - name: Verify Project
+        run: |
+          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.DEV_CONNECTION_STRING }}" > verify.sql
+          echo "project verify -verbose" >> verify.sql
+          sql @verify.sql
+      
+      - name: Check for SQL Errors
+        run: |
+          if grep -r "ORA-" ./dist/releases/next/changes; then
+            echo "SQL errors found in staged changes"
+            exit 1
+          fi
+          echo "No SQL errors found in staged changes"
+
+  # Jobs for push to main (after PR merge) - create release and deploy to environments
+  create-release:
+    name: Create Release and Artifact
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      version: ${{ steps.release_version.outputs.version }}
+      artifact_name: ${{ steps.release_version.outputs.artifact_name }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      
+      - name: Download and install SQLcl
+        run: |
+          mkdir -p $HOME/sqlcl
+          curl -o $HOME/sqlcl.zip https://download.oracle.com/otn_software/java/sqldeveloper/sqlcl-${{ env.SQLCL_VERSION }}.zip
+          unzip $HOME/sqlcl.zip -d $HOME
+          echo "$HOME/sqlcl/bin" >> $GITHUB_PATH
+      
+      - name: Set Git User
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+      
+      - name: Create Release Version
+        id: release_version
+        run: |
+          # Generate version based on semantic versioning with date
+          MAJOR_VERSION=1.0
+          RELEASE_SUFFIX=$(date +%Y%m%d)-${{ github.run_number }}
+          VERSION="$MAJOR_VERSION"
+          ARTIFACT_VERSION="$MAJOR_VERSION-$RELEASE_SUFFIX"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "artifact_name=${{ env.PROJECT_NAME }}-$ARTIFACT_VERSION.zip" >> $GITHUB_OUTPUT
+          echo "artifact_version=$ARTIFACT_VERSION" >> $GITHUB_OUTPUT
+          echo "Created release version: $VERSION (Artifact: $ARTIFACT_VERSION)"
+      
+      - name: Create Project Release
+        run: |
+          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.DEV_CONNECTION_STRING }}" > release.sql
+          echo "project release -version ${{ steps.release_version.outputs.version }} -verbose" >> release.sql
+          sql @release.sql
+      
+      - name: Generate Artifact
+        run: |
+          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.DEV_CONNECTION_STRING }}" > artifact.sql
+          echo "project gen-artifact -version ${{ steps.release_version.outputs.artifact_version }}" >> artifact.sql
+          sql @artifact.sql
+      
+      - name: Commit Changes
+        run: |
+          git add .
+          git commit -m "Version ${{ steps.release_version.outputs.version }}"
+          git push
+      
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: sql-artifact
+          path: dist/artifacts/${{ steps.release_version.outputs.artifact_name }}
+          retention-days: 30
+  
+  deploy-test:
+    name: Deploy to TEST Environment
+    needs: create-release
+    runs-on: ubuntu-latest
+    environment:
+      name: test
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      
+      - name: Download and install SQLcl
+        run: |
+          mkdir -p $HOME/sqlcl
+          curl -o $HOME/sqlcl.zip https://download.oracle.com/otn_software/java/sqldeveloper/sqlcl-${{ env.SQLCL_VERSION }}.zip
+          unzip $HOME/sqlcl.zip -d $HOME
+          echo "$HOME/sqlcl/bin" >> $GITHUB_PATH
+      
+      - name: Download Release Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: sql-artifact
+          path: ./artifacts
+      
+      - name: Deploy to TEST
+        run: |
+          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.TEST_CONNECTION_STRING }}" > deploy.sql
+          echo "project deploy -file ./artifacts/${{ needs.create-release.outputs.artifact_name }} -verbose" >> deploy.sql
+          sql @deploy.sql
+      
+      - name: Run Validation Tests
+        run: |
+          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.TEST_CONNECTION_STRING }}" > tests.sql
+          echo "cd test" >> tests.sql
+          echo "@run_all_tests.sql" >> tests.sql
+          sql @tests.sql
+  
+  deploy-uat:
+    name: Deploy to UAT Environment
+    needs: [create-release, deploy-test]
+    runs-on: ubuntu-latest
+    environment:
+      name: uat
+      # Environment protection rule - requires approval for UAT
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      
+      - name: Download and install SQLcl
+        run: |
+          mkdir -p $HOME/sqlcl
+          curl -o $HOME/sqlcl.zip https://download.oracle.com/otn_software/java/sqldeveloper/sqlcl-${{ env.SQLCL_VERSION }}.zip
+          unzip $HOME/sqlcl.zip -d $HOME
+          echo "$HOME/sqlcl/bin" >> $GITHUB_PATH
+      
+      - name: Download Release Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: sql-artifact
+          path: ./artifacts
+      
+      - name: Deploy to UAT
+        run: |
+          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.UAT_CONNECTION_STRING }}" > deploy.sql
+          echo "project deploy -file ./artifacts/${{ needs.create-release.outputs.artifact_name }} -verbose" >> deploy.sql
+          sql @deploy.sql
+
+  deploy-prod:
+    name: Deploy to PROD Environment
+    needs: [create-release, deploy-test, deploy-uat]
+    runs-on: ubuntu-latest
+    environment:
+      name: prod
+      # Environment protection rule - requires approval for PROD
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      
+      - name: Download and install SQLcl
+        run: |
+          mkdir -p $HOME/sqlcl
+          curl -o $HOME/sqlcl.zip https://download.oracle.com/otn_software/java/sqldeveloper/sqlcl-${{ env.SQLCL_VERSION }}.zip
+          unzip $HOME/sqlcl.zip -d $HOME
+          echo "$HOME/sqlcl/bin" >> $GITHUB_PATH
+      
+      - name: Download Release Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: sql-artifact
+          path: ./artifacts
+      
+      - name: Deploy to PROD
+        run: |
+          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.PROD_CONNECTION_STRING }}" > deploy.sql
+          echo "project deploy -file ./artifacts/${{ needs.create-release.outputs.artifact_name }} -verbose" >> deploy.sql
+          sql @deploy.sql
+
