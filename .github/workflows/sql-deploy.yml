@@ -11,6 +11,7 @@ env:
   SQLCL_PATH: "/opt/homebrew/Caskroom/sqlcl/25.1.1.113.2054/sqlcl/bin/sql"
   JAVA_HOME: "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home"
   WORK_DIR: "/Users/swami/WorkSpace/oracle/learn/practice/event_management"
+  TNS_ADMIN: "/Users/swami/WorkSpace/oracle/network/admin"
 
 permissions:
   contents: write
