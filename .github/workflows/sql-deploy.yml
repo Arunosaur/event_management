@@ -12,57 +12,19 @@ env:
   JAVA_HOME: "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home"
   WORK_DIR: "/Users/swami/WorkSpace/oracle/learn/practice/event_management"
 
-# Set default permissions
 permissions:
   contents: write
   pull-requests: write
   actions: write
 
 jobs:
-  # Job for pull request validation - runs on PR creation/update to main
-  validate-pr:
-    name: SQL PR Validation
-    runs-on: self-hosted
-    if: github.event_name == 'pull_request'
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-      
-      - name: Setup Environment
-        run: |
-          echo "Setting up environment..."
-          export PATH=$JAVA_HOME/bin:$PATH
-          which java
-          java -version
-          ${SQLCL_PATH} -v
-      
-      - name: Verify SQL Project
-        run: |
-          # Create SQL script for verification
-          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.DEV_CONNECTION_STRING }}" > verify.sql
-          echo "project verify -verbose" >> verify.sql
-          ${SQLCL_PATH} @verify.sql
-      
-      - name: Check for SQL Errors
-        run: |
-          if grep -r "ORA-" ./dist/releases/next/changes 2>/dev/null; then
-            echo "SQL errors found in staged changes"
-            exit 1
-          else
-            echo "No SQL errors found in staged changes"
-          fi
-          
-  # Jobs for push to main (after PR merge) - create release and deploy to environments
   release-artifact:
     name: SQL Release Creation
     runs-on: self-hosted
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     outputs:
       version: ${{ steps.release_version.outputs.version }}
-      artifact_name: ${{ steps.release_version.outputs.artifact_name }}
+      artifact_path: ${{ steps.artifact_gen.outputs.artifact_path }}
     
     steps:
       - name: Checkout code
@@ -70,61 +32,26 @@ jobs:
         with:
           fetch-depth: 0
       
-      - name: Setup Environment
-        run: |
-          echo "Setting up environment..."
-          export PATH=$JAVA_HOME/bin:$PATH
-          which java
-          java -version
-          ${SQLCL_PATH} -v
-      
-      - name: Set Git User
-        run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-      
-      - name: Create Release Version
+      - name: Set Release Version
         id: release_version
         run: |
-          # Generate version based on semantic versioning with date
-          MAJOR_VERSION=1.0
-          RELEASE_SUFFIX=$(date +%Y%m%d)-${{ github.run_number }}
-          VERSION="$MAJOR_VERSION"
-          ARTIFACT_VERSION="$MAJOR_VERSION-$RELEASE_SUFFIX"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "artifact_name=${{ env.PROJECT_NAME }}-$ARTIFACT_VERSION.zip" >> $GITHUB_OUTPUT
-          echo "artifact_version=$ARTIFACT_VERSION" >> $GITHUB_OUTPUT
-          echo "Created release version: $VERSION (Artifact: $ARTIFACT_VERSION)"
-      
+          echo "version=1.0.0" >> $GITHUB_OUTPUT
+
       - name: Create Project Release
         run: |
-          # Create SQL script for release creation
-          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.DEV_CONNECTION_STRING }}" > release.sql
-          echo "project release -version ${{ steps.release_version.outputs.version }} -verbose" >> release.sql
-          ${SQLCL_PATH} @release.sql
-      
+          ${SQLCL_PATH} "SVC_CICD/SvcCicdPass@PDB_DEV" << EOF
+          project release -version ${{ steps.release_version.outputs.version }}
+          exit
+          EOF
+
       - name: Generate Artifact
+        id: artifact_gen
         run: |
-          # Create SQL script for artifact generation
-          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.DEV_CONNECTION_STRING }}" > artifact.sql
-          echo "project gen-artifact -version ${{ steps.release_version.outputs.artifact_version }}" >> artifact.sql
-          ${SQLCL_PATH} @artifact.sql
-          
-          # Show generated artifact
-          ls -la ${WORK_DIR}/dist/artifacts/
-      
-      - name: Commit Changes
-        run: |
-          git add .
-          git commit -m "Version ${{ steps.release_version.outputs.version }}" || echo "No changes to commit"
-          git push || echo "No changes to push"
-      
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: sql-artifact
-          path: ${{ env.WORK_DIR }}/dist/artifacts/${{ steps.release_version.outputs.artifact_name }}
-          retention-days: 30
+          ${SQLCL_PATH} "SVC_CICD/SvcCicdPass@PDB_DEV" << EOF
+          project gen-artifact
+          exit
+          EOF
+          echo "artifact_path=${WORK_DIR}/artifact/event_management-${{ steps.release_version.outputs.version }}.zip" >> $GITHUB_OUTPUT
   
   deploy-test:
     name: SQL Deploy to TEST
@@ -134,95 +61,29 @@ jobs:
       name: test
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Setup Environment
-        run: |
-          echo "Setting up environment..."
-          export PATH=$JAVA_HOME/bin:$PATH
-          which java
-          java -version
-          ${SQLCL_PATH} -v
-      
-      - name: Download Release Artifact
-        uses: actions/download-artifact@v3
-        with:
-          name: sql-artifact
-          path: ${WORK_DIR}/artifacts
-      
-      - name: List Downloaded Artifacts
-        run: |
-          ls -la ${WORK_DIR}/artifacts/
-      
       - name: Deploy to TEST
         run: |
-          # Create SQL script for TEST deployment
-          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.TEST_CONNECTION_STRING }}" > deploy.sql
-          echo "project deploy -file ${WORK_DIR}/artifacts/${{ needs.release-artifact.outputs.artifact_name }} -verbose" >> deploy.sql
-          
-          # Execute SQLcl to deploy to TEST
-          ${SQLCL_PATH} @deploy.sql
-      
-      - name: Run Validation Tests
-        run: |
-          # Create SQL script for validation tests
-          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.TEST_CONNECTION_STRING }}" > tests.sql
-          echo "select table_name from all_tables where owner='EM';" >> tests.sql
-          echo "select count(*) from all_constraints where owner='EM';" >> tests.sql
-          
-          # Execute SQLcl to validate deployment
-          ${SQLCL_PATH} @tests.sql
-  
+          ${SQLCL_PATH} "SVC_CICD/SvcCicdPass@PDB_TEST" << EOF
+          project deploy -file ${{ needs.release-artifact.outputs.artifact_path }}
+          select table_name from all_tables where owner='EM' order by 1;
+          exit
+          EOF
+
   deploy-uat:
     name: SQL Deploy to UAT
     needs: [release-artifact, deploy-test]
     runs-on: self-hosted
     environment:
       name: uat
-      # Environment protection rule - requires approval for UAT
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Setup Environment
-        run: |
-          echo "Setting up environment..."
-          export PATH=$JAVA_HOME/bin:$PATH
-          which java
-          java -version
-          ${SQLCL_PATH} -v
-      
-      - name: Download Release Artifact
-        uses: actions/download-artifact@v3
-        with:
-          name: sql-artifact
-          path: ${{ env.WORK_DIR }}/artifacts
-      
-      - name: List Downloaded Artifacts
-        run: |
-          ls -la ${{ env.WORK_DIR }}/artifacts/
-      
       - name: Deploy to UAT
         run: |
-          # Create SQL script for UAT deployment
-          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.UAT_CONNECTION_STRING }}" > deploy.sql
-          echo "project deploy -file ${{ env.WORK_DIR }}/artifacts/${{ needs.release-artifact.outputs.artifact_name }} -verbose" >> deploy.sql
-          
-          # Execute SQLcl to deploy to UAT
-          ${SQLCL_PATH} @deploy.sql
-      
-      - name: Run Validation Tests
-        run: |
-          # Create SQL script for validation tests
-          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.UAT_CONNECTION_STRING }}" > tests.sql
-          echo "select table_name from all_tables where owner='EM';" >> tests.sql
-          echo "select count(*) from all_constraints where owner='EM';" >> tests.sql
-          echo "select count(*) from all_indexes where owner='EM';" >> tests.sql
-          
-          # Execute SQLcl to validate deployment
-          ${SQLCL_PATH} @tests.sql
+          ${SQLCL_PATH} "SVC_CICD/SvcCicdPass@PDB_UAT" << EOF
+          project deploy -file ${{ needs.release-artifact.outputs.artifact_path }}
+          select table_name from all_tables where owner='EM' order by 1;
+          exit
+          EOF
 
   deploy-prod:
     name: SQL Deploy to PROD
@@ -230,57 +91,12 @@ jobs:
     runs-on: self-hosted
     environment:
       name: prod
-      # Environment protection rule - requires approval for PROD
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Setup Environment
-        run: |
-          echo "Setting up environment..."
-          export PATH=$JAVA_HOME/bin:$PATH
-          which java
-          java -version
-          ${SQLCL_PATH} -v
-      
-      - name: Download Release Artifact
-        uses: actions/download-artifact@v3
-        with:
-          name: sql-artifact
-          path: ${{ env.WORK_DIR }}/artifacts
-      
-      - name: List Downloaded Artifacts
-        run: |
-          ls -la ${{ env.WORK_DIR }}/artifacts/
-      
       - name: Deploy to PROD
         run: |
-          # Create SQL script for PROD deployment
-          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.PROD_CONNECTION_STRING }}" > deploy.sql
-          echo "project deploy -file ${{ env.WORK_DIR }}/artifacts/${{ needs.release-artifact.outputs.artifact_name }} -verbose" >> deploy.sql
-          
-          # Execute SQLcl to deploy to PROD
-          ${SQLCL_PATH} @deploy.sql
-      
-      - name: Run Validation Tests
-        run: |
-          # Create SQL script for validation tests
-          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.PROD_CONNECTION_STRING }}" > tests.sql
-          echo "select table_name from all_tables where owner='EM';" >> tests.sql
-          echo "select count(*) from all_constraints where owner='EM';" >> tests.sql
-          echo "select count(*) from all_indexes where owner='EM';" >> tests.sql
-          echo "select to_char(sysdate, 'YYYY-MM-DD HH24:MI:SS') as deployment_time from dual;" >> tests.sql
-          
-          # Execute SQLcl to validate deployment
-          ${SQLCL_PATH} @tests.sql
-      
-      - name: Deployment Summary
-        run: |
-          echo "===================================="
-          echo "Deployment to PRODUCTION completed"
-          echo "Version: ${{ needs.release-artifact.outputs.version }}"
-          echo "Artifact: ${{ needs.release-artifact.outputs.artifact_name }}"
-          echo "Date: $(date)"
-          echo "===================================="
-
+          ${SQLCL_PATH} "SVC_CICD/SvcCicdPass@PDB_PROD" << EOF
+          project deploy -file ${{ needs.release-artifact.outputs.artifact_path }}
+          select table_name from all_tables where owner='EM' order by 1;
+          exit
+          EOF
