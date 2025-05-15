@@ -8,12 +8,13 @@ on:
 
 env:
   PROJECT_NAME: "event_management"
+  SQLCL_PATH: "/opt/homebrew/Caskroom/sqlcl/25.1.1.113.2054/sqlcl/bin/sql"
 
 jobs:
   # Job for pull request validation - runs on PR creation/update to main
   validate-pr:
     name: SQL PR Validation
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     if: github.event_name == 'pull_request'
     
     steps:
@@ -22,15 +23,25 @@ jobs:
         with:
           fetch-depth: 0
       
-      - name: Run Local Verification
+      - name: Verify SQL Project
         run: |
-          echo "This would validate the SQL PR using local SQLcl"
-          echo "In a real workflow, run: /opt/homebrew/Caskroom/sqlcl/25.1.1.113.2054/sqlcl/bin/sql \"SVC_CICD\"/\"password\"@connection_string @verify.sql"
+          # Create SQL script for verification
+          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.DEV_CONNECTION_STRING }}" > verify.sql
+          echo "project verify -verbose" >> verify.sql
+          ${SQLCL_PATH} @verify.sql
+      
+      - name: Check for SQL Errors
+        run: |
+          if grep -r "ORA-" ./dist/releases/next/changes; then
+            echo "SQL errors found in staged changes"
+            exit 1
+          fi
+          echo "No SQL errors found in staged changes"
           
   # Jobs for push to main (after PR merge) - create release and deploy to environments
   release-artifact:
     name: SQL Release Creation
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     outputs:
       version: ${{ steps.release_version.outputs.version }}
@@ -41,6 +52,11 @@ jobs:
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
+      
+      - name: Set Git User
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
       
       - name: Create Release Version
         id: release_version
@@ -55,20 +71,37 @@ jobs:
           echo "artifact_version=$ARTIFACT_VERSION" >> $GITHUB_OUTPUT
           echo "Created release version: $VERSION (Artifact: $ARTIFACT_VERSION)"
       
-      - name: Run Local Release Creation
+      - name: Create Project Release
         run: |
-          echo "This would create a release using local SQLcl"
-          echo "In a real workflow, run: /opt/homebrew/Caskroom/sqlcl/25.1.1.113.2054/sqlcl/bin/sql \"SVC_CICD\"/\"password\"@connection_string @release.sql"
+          # Create SQL script for release creation
+          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.DEV_CONNECTION_STRING }}" > release.sql
+          echo "project release -version ${{ steps.release_version.outputs.version }} -verbose" >> release.sql
+          ${SQLCL_PATH} @release.sql
       
-      - name: Mock Artifact Upload
+      - name: Generate Artifact
         run: |
-          echo "This would upload the locally created artifact"
-          echo "In a real workflow, use actions/upload-artifact to upload the locally generated ZIP"
+          # Create SQL script for artifact generation
+          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.DEV_CONNECTION_STRING }}" > artifact.sql
+          echo "project gen-artifact -version ${{ steps.release_version.outputs.artifact_version }}" >> artifact.sql
+          ${SQLCL_PATH} @artifact.sql
+      
+      - name: Commit Changes
+        run: |
+          git add .
+          git commit -m "Version ${{ steps.release_version.outputs.version }}"
+          git push
+      
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: sql-artifact
+          path: dist/artifacts/${{ steps.release_version.outputs.artifact_name }}
+          retention-days: 30
   
   deploy-test:
     name: SQL Deploy to TEST
     needs: release-artifact
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     environment:
       name: test
     
@@ -76,15 +109,35 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
       
-      - name: Run Local TEST Deployment
+      - name: Download Release Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: sql-artifact
+          path: ./artifacts
+      
+      - name: Deploy to TEST
         run: |
-          echo "This would deploy to TEST using local SQLcl"
-          echo "In a real workflow, run: /opt/homebrew/Caskroom/sqlcl/25.1.1.113.2054/sqlcl/bin/sql \"SVC_CICD\"/\"password\"@test_connection @deploy.sql"
+          # Create SQL script for TEST deployment
+          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.TEST_CONNECTION_STRING }}" > deploy.sql
+          echo "project deploy -file ./artifacts/${{ needs.release-artifact.outputs.artifact_name }} -verbose" >> deploy.sql
+          
+          # Execute SQLcl to deploy to TEST
+          ${SQLCL_PATH} @deploy.sql
+      
+      - name: Run Validation Tests
+        run: |
+          # Create SQL script for validation tests
+          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.TEST_CONNECTION_STRING }}" > tests.sql
+          echo "select table_name from all_tables where owner='EM';" >> tests.sql
+          echo "select count(*) from all_constraints where owner='EM';" >> tests.sql
+          
+          # Execute SQLcl to validate deployment
+          ${SQLCL_PATH} @tests.sql
   
   deploy-uat:
     name: SQL Deploy to UAT
     needs: [release-artifact, deploy-test]
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     environment:
       name: uat
       # Environment protection rule - requires approval for UAT
@@ -93,15 +146,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
       
-      - name: Run Local UAT Deployment
+      - name: Download Release Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: sql-artifact
+          path: ./artifacts
+      
+      - name: Deploy to UAT
         run: |
-          echo "This would deploy to UAT using local SQLcl"
-          echo "In a real workflow, run: /opt/homebrew/Caskroom/sqlcl/25.1.1.113.2054/sqlcl/bin/sql \"SVC_CICD\"/\"password\"@uat_connection @deploy.sql"
+          # Create SQL script for UAT deployment
+          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.UAT_CONNECTION_STRING }}" > deploy.sql
+          echo "project deploy -file ./artifacts/${{ needs.release-artifact.outputs.artifact_name }} -verbose" >> deploy.sql
+          
+          # Execute SQLcl to deploy to UAT
+          ${SQLCL_PATH} @deploy.sql
 
   deploy-prod:
     name: SQL Deploy to PROD
     needs: [release-artifact, deploy-test, deploy-uat]
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     environment:
       name: prod
       # Environment protection rule - requires approval for PROD
@@ -110,8 +173,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
       
-      - name: Run Local PROD Deployment
+      - name: Download Release Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: sql-artifact
+          path: ./artifacts
+      
+      - name: Deploy to PROD
         run: |
-          echo "This would deploy to PROD using local SQLcl"
-          echo "In a real workflow, run: /opt/homebrew/Caskroom/sqlcl/25.1.1.113.2054/sqlcl/bin/sql \"SVC_CICD\"/\"password\"@prod_connection @deploy.sql"
+          # Create SQL script for PROD deployment
+          echo "connect \"SVC_CICD\"/\"${{ secrets.CICD_PASSWORD }}\"@${{ secrets.PROD_CONNECTION_STRING }}" > deploy.sql
+          echo "project deploy -file ./artifacts/${{ needs.release-artifact.outputs.artifact_name }} -verbose" >> deploy.sql
+          
+          # Execute SQLcl to deploy to PROD
+          ${SQLCL_PATH} @deploy.sql
 
